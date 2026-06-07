@@ -3,6 +3,7 @@ import 'package:patel_properties/screens/clients_page.dart';
 import 'package:patel_properties/screens/upcoming_visits.dart';
 import 'propertiespage.dart';
 import 'rent_agreements_page.dart';
+import 'property_management_page.dart'; // Add this import
 
 class DashboardPage extends StatelessWidget {
   const DashboardPage({super.key});
@@ -57,7 +58,7 @@ class DashboardPage extends StatelessWidget {
                         crossAxisCount: crossAxisCount,
                         mainAxisSpacing: 16,
                         crossAxisSpacing: 16,
-                        childAspectRatio: 1, // keep buttons square
+                        childAspectRatio: 1,
                         children: [
                           _buildDashboardButton(
                             context,
@@ -109,6 +110,21 @@ class DashboardPage extends StatelessWidget {
                                 MaterialPageRoute(
                                   builder: (context) =>
                                       const RentAgreementsPage(),
+                                ),
+                              );
+                            },
+                          ),
+                          // ✅ NEW BUTTON
+                          _buildDashboardButton(
+                            context,
+                            title: "Property Management",
+                            icon: Icons.manage_accounts,
+                            onPressed: () {
+                              Navigator.push(
+                                context,
+                                MaterialPageRoute(
+                                  builder: (context) =>
+                                      const PropertyManagementPage(),
                                 ),
                               );
                             },
