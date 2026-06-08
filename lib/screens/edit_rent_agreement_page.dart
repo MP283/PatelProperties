@@ -4,6 +4,26 @@ import 'package:intl/intl.dart';
 
 final dateFormat = DateFormat("dd-MM-yyyy");
 
+// ─── Status Color Helper ──────────────────────────────────────────────────────
+
+Color getStatusColor(String status) {
+  switch (status) {
+    case 'done':
+      return const Color(0xFF10B981); // green
+    case 'submitted':
+      return const Color(0xFF3B82F6); // blue
+    case 'payment pending':
+      return const Color(0xFFF59E0B); // amber
+    case 'not required':
+      return const Color(0xFF8B5CF6); // purple
+    case 'pending':
+    default:
+      return const Color(0xFFEF4444); // red
+  }
+}
+
+// ─── Page ─────────────────────────────────────────────────────────────────────
+
 class EditRentAgreementPage extends StatefulWidget {
   final String docId;
   final Map<String, dynamic> data;
@@ -39,34 +59,53 @@ class _EditRentAgreementPageState extends State<EditRentAgreementPage> {
   late bool ownerChargesPaid;
   late bool tenantChargesPaid;
 
+  // All valid status options
+  static const _statusOptions = [
+    "pending",
+    "done",
+    "submitted",
+    "payment pending",
+    "not required",
+  ];
+
   @override
   void initState() {
     super.initState();
     final d = widget.data;
 
     tokenController = TextEditingController(text: d["tokenNumber"] ?? "");
-    passwordController = TextEditingController(text: d["password"] ?? "@Ep786110");
+    passwordController =
+        TextEditingController(text: d["password"] ?? "@Ep786110");
     ownerController = TextEditingController(text: d["ownerName"] ?? "");
     tenantController = TextEditingController(text: d["tenantName"] ?? "");
     propertyController = TextEditingController(text: d["propertyName"] ?? "");
-    ownerEmailController = TextEditingController(text: d["ownerEmail"] ?? "");
-    tenantEmailController = TextEditingController(text: d["tenantEmail"] ?? "");
-    ownerPhoneController = TextEditingController(text: d["ownerPhone"] ?? "");
-    tenantPhoneController = TextEditingController(text: d["tenantPhone"] ?? "");
+    ownerEmailController =
+        TextEditingController(text: d["ownerEmail"] ?? "");
+    tenantEmailController =
+        TextEditingController(text: d["tenantEmail"] ?? "");
+    ownerPhoneController =
+        TextEditingController(text: d["ownerPhone"] ?? "");
+    tenantPhoneController =
+        TextEditingController(text: d["tenantPhone"] ?? "");
     stampDutyController = TextEditingController(
         text: d["stampDuty"] != null ? d["stampDuty"].toString() : "");
     costController = TextEditingController(
         text: d["cost"] != null ? d["cost"].toString() : "");
     durationController = TextEditingController(
-        text: d["durationMonths"] != null ? d["durationMonths"].toString() : "");
+        text: d["durationMonths"] != null
+            ? d["durationMonths"].toString()
+            : "");
 
     if (d["startDate"] != null) {
       startDate = (d["startDate"] as Timestamp).toDate();
     }
 
-    status = d["status"] ?? "pending";
-    ownerChargesPaid = d["ownerChargesPaid"] ?? false;   // ✅ pre-filled
-    tenantChargesPaid = d["tenantChargesPaid"] ?? false; // ✅ pre-filled
+    // Safely set status — fallback to 'pending' if value not in list
+    final savedStatus = d["status"] ?? "pending";
+    status = _statusOptions.contains(savedStatus) ? savedStatus : "pending";
+
+    ownerChargesPaid = d["ownerChargesPaid"] ?? false;
+    tenantChargesPaid = d["tenantChargesPaid"] ?? false;
   }
 
   @override
@@ -109,9 +148,17 @@ class _EditRentAgreementPageState extends State<EditRentAgreementPage> {
       endDate = DateTime(
         startDate!.year,
         startDate!.month + durationMonths,
-        startDate!.day-1, // set end date to one day before the same date in the next month
+        startDate!.day - 1,
       );
     }
+
+    // Save as UTC midnight to avoid timezone shift in Google Sheets
+    final utcStartDate = startDate != null
+        ? DateTime.utc(startDate!.year, startDate!.month, startDate!.day)
+        : null;
+    final utcEndDate = endDate != null
+        ? DateTime.utc(endDate.year, endDate.month, endDate.day)
+        : null;
 
     await FirebaseFirestore.instance
         .collection("rentAgreements")
@@ -129,18 +176,20 @@ class _EditRentAgreementPageState extends State<EditRentAgreementPage> {
       "stampDuty": stampDuty,
       "cost": cost,
       "costPerParty": cost > 0 ? cost / 2 : 0.0,
-      "startDate": startDate,
+      "startDate": utcStartDate,
       "durationMonths": durationMonths,
-      "endDate": endDate,
-      "ownerChargesPaid": ownerChargesPaid,   // ✅ updated
-      "tenantChargesPaid": tenantChargesPaid, // ✅ updated
+      "endDate": utcEndDate,
+      "ownerChargesPaid": ownerChargesPaid,
+      "tenantChargesPaid": tenantChargesPaid,
       "status": status,
     });
 
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text("Agreement updated")),
-    );
-    Navigator.pop(context);
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Agreement updated")),
+      );
+      Navigator.pop(context);
+    }
   }
 
   @override
@@ -155,8 +204,10 @@ class _EditRentAgreementPageState extends State<EditRentAgreementPage> {
             children: [
               TextFormField(
                 controller: tokenController,
-                decoration: const InputDecoration(labelText: "Token Number *"),
-                validator: (v) => v!.isEmpty ? "Token number is required" : null,
+                decoration:
+                    const InputDecoration(labelText: "Token Number *"),
+                validator: (v) =>
+                    v!.isEmpty ? "Token number is required" : null,
               ),
               TextFormField(
                 controller: passwordController,
@@ -175,7 +226,8 @@ class _EditRentAgreementPageState extends State<EditRentAgreementPage> {
               ),
               TextFormField(
                 controller: propertyController,
-                decoration: const InputDecoration(labelText: "Property Name"),
+                decoration:
+                    const InputDecoration(labelText: "Property Name"),
               ),
               TextFormField(
                 controller: ownerEmailController,
@@ -205,51 +257,117 @@ class _EditRentAgreementPageState extends State<EditRentAgreementPage> {
               ),
               TextFormField(
                 controller: durationController,
-                decoration: const InputDecoration(labelText: "Duration (months)"),
+                decoration:
+                    const InputDecoration(labelText: "Duration (months)"),
                 keyboardType: TextInputType.number,
               ),
-              const SizedBox(height: 12),
-              Row(
-                children: [
-                  Text(startDate == null
-                      ? "Start Date: Not selected"
-                      : "Start Date: ${dateFormat.format(startDate!)}"),
-                  const Spacer(),
-                  ElevatedButton(
-                    onPressed: () async {
-                      final picked = await showDatePicker(
-                        context: context,
-                        initialDate: startDate ?? DateTime.now(),
-                        firstDate: DateTime(2020),
-                        lastDate: DateTime(2030),
-                      );
-                      if (picked != null) {
-                        setState(() => startDate = picked);
-                      }
-                    },
-                    child: const Text("Pick Date"),
-                  ),
-                ],
+
+              const SizedBox(height: 16),
+
+              // ── Start Date Picker ──
+              Container(
+                padding: const EdgeInsets.symmetric(
+                    horizontal: 14, vertical: 14),
+                decoration: BoxDecoration(
+                  border: Border.all(color: Colors.grey.shade400),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.calendar_today_rounded,
+                        size: 18, color: Colors.grey),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        startDate == null
+                            ? "Start Date: Not selected"
+                            : "Start Date: ${dateFormat.format(startDate!)}",
+                        style: TextStyle(
+                          fontSize: 14,
+                          color: startDate == null
+                              ? Colors.grey
+                              : Colors.black87,
+                        ),
+                      ),
+                    ),
+                    TextButton(
+                      onPressed: () async {
+                        final picked = await showDatePicker(
+                          context: context,
+                          initialDate: startDate ?? DateTime.now(),
+                          firstDate: DateTime(2020),
+                          lastDate: DateTime(2030),
+                        );
+                        if (picked != null) {
+                          setState(() => startDate = picked);
+                        }
+                      },
+                      child: const Text("Pick Date"),
+                    ),
+                  ],
+                ),
               ),
-              const SizedBox(height: 12),
+
+              const SizedBox(height: 16),
+
+              // ── Status Dropdown with colors ──
               DropdownButtonFormField<String>(
                 value: status,
-                items: ["pending", "done", "submitted", "payment pending"]
-                    .map((s) => DropdownMenuItem(value: s, child: Text(s)))
+                decoration: const InputDecoration(labelText: "Status"),
+                selectedItemBuilder: (context) {
+                  return _statusOptions.map((s) {
+                    return Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 10, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: getStatusColor(s).withOpacity(0.15),
+                        borderRadius: BorderRadius.circular(20),
+                        border: Border.all(
+                            color: getStatusColor(s).withOpacity(0.4)),
+                      ),
+                      child: Text(
+                        s,
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                          color: getStatusColor(s),
+                        ),
+                      ),
+                    );
+                  }).toList();
+                },
+                items: _statusOptions
+                    .map((s) => DropdownMenuItem(
+                          value: s,
+                          child: Row(
+                            children: [
+                              Container(
+                                width: 10,
+                                height: 10,
+                                decoration: BoxDecoration(
+                                  color: getStatusColor(s),
+                                  shape: BoxShape.circle,
+                                ),
+                              ),
+                              const SizedBox(width: 10),
+                              Text(s),
+                            ],
+                          ),
+                        ))
                     .toList(),
                 onChanged: (val) => setState(() => status = val!),
-                decoration: const InputDecoration(labelText: "Status"),
               ),
+
               const SizedBox(height: 8),
 
-              // ✅ Owner Charges Paid toggle (pre-filled from existing data)
+              // ── Owner Charges Paid ──
               SwitchListTile(
                 title: const Text("Owner Charges Paid"),
                 value: ownerChargesPaid,
                 onChanged: (val) => setState(() => ownerChargesPaid = val),
               ),
 
-              // ✅ Tenant Charges Paid toggle (pre-filled from existing data)
+              // ── Tenant Charges Paid ──
               SwitchListTile(
                 title: const Text("Tenant Charges Paid"),
                 value: tenantChargesPaid,
@@ -257,10 +375,13 @@ class _EditRentAgreementPageState extends State<EditRentAgreementPage> {
               ),
 
               const SizedBox(height: 20),
+
               ElevatedButton(
                 onPressed: _updateAgreement,
                 child: const Text("Update Agreement"),
               ),
+
+              const SizedBox(height: 20),
             ],
           ),
         ),

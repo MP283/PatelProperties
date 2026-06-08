@@ -25,19 +25,37 @@ class _RentAgreementsPageState extends State<RentAgreementsPage> {
     super.dispose();
   }
 
+  // ─── Status Color ─────────────────────────────────────────────────────────
+
   Color _statusColor(String? status) {
     switch (status) {
       case "pending":
-        return Colors.red;
+        return const Color(0xFFEF4444); // red
       case "done":
-        return Colors.green;
+        return const Color(0xFF10B981); // green
       case "payment pending":
-        return Colors.orange;
+        return const Color(0xFFF59E0B); // amber
       case "submitted":
-        return Colors.blue;
+        return const Color(0xFF3B82F6); // blue
+      case "not required":
+        return const Color(0xFF8B5CF6); // purple
       default:
         return Colors.grey;
     }
+  }
+
+  // ─── Filter Logic ─────────────────────────────────────────────────────────
+
+  bool _matchesFilter(Map<String, dynamic> data) {
+    final status = data["status"] ?? "";
+
+    // When "All" is selected, hide "not required" entries
+    if (filterStatus == "All") {
+      return status != "not required";
+    }
+
+    // When a specific status is selected, show only that status
+    return status == filterStatus;
   }
 
   bool _matchesSearch(Map<String, dynamic> data) {
@@ -59,7 +77,7 @@ class _RentAgreementsPageState extends State<RentAgreementsPage> {
       ),
       body: Column(
         children: [
-          // ✅ Filter + Search stacked vertically — no overflow on mobile
+          // ── Filter + Search ──
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
             child: Column(
@@ -73,17 +91,55 @@ class _RentAgreementsPageState extends State<RentAgreementsPage> {
                         EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                     border: OutlineInputBorder(),
                   ),
+                  selectedItemBuilder: (context) {
+                    return [
+                      "All",
+                      "pending",
+                      "done",
+                      "submitted",
+                      "payment pending",
+                      "not required",
+                    ].map((s) {
+                      if (s == "All") return const Text("All");
+                      return Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 10, vertical: 3),
+                        decoration: BoxDecoration(
+                          color: _statusColor(s).withOpacity(0.15),
+                          borderRadius: BorderRadius.circular(20),
+                          border: Border.all(
+                              color: _statusColor(s).withOpacity(0.4)),
+                        ),
+                        child: Text(
+                          s,
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                            color: _statusColor(s),
+                          ),
+                        ),
+                      );
+                    }).toList();
+                  },
                   items: [
                     "All",
                     "pending",
                     "done",
                     "submitted",
                     "payment pending",
+                    "not required",
                   ].map((s) {
                     return DropdownMenuItem(
                       value: s,
                       child: s == "All"
-                          ? const Text("All")
+                          ? const Row(
+                              children: [
+                                Icon(Icons.all_inclusive,
+                                    size: 14, color: Colors.grey),
+                                SizedBox(width: 8),
+                                Text("All"),
+                              ],
+                            )
                           : Row(
                               children: [
                                 Container(
@@ -96,6 +152,14 @@ class _RentAgreementsPageState extends State<RentAgreementsPage> {
                                 ),
                                 const SizedBox(width: 8),
                                 Text(s),
+                                if (s == "not required") ...[
+                                  const SizedBox(width: 6),
+                                  const Text(
+                                    "(hidden by default)",
+                                    style: TextStyle(
+                                        fontSize: 11, color: Colors.grey),
+                                  ),
+                                ],
                               ],
                             ),
                     );
@@ -133,6 +197,7 @@ class _RentAgreementsPageState extends State<RentAgreementsPage> {
             ),
           ),
 
+          // ── List ──
           Expanded(
             child: StreamBuilder<QuerySnapshot>(
               stream: FirebaseFirestore.instance
@@ -141,7 +206,8 @@ class _RentAgreementsPageState extends State<RentAgreementsPage> {
                   .snapshots(),
               builder: (context, snapshot) {
                 if (snapshot.hasError) {
-                  return const Center(child: Text("Error loading agreements"));
+                  return const Center(
+                      child: Text("Error loading agreements"));
                 }
                 if (!snapshot.hasData) {
                   return const Center(child: CircularProgressIndicator());
@@ -151,14 +217,26 @@ class _RentAgreementsPageState extends State<RentAgreementsPage> {
 
                 final filtered = docs.where((d) {
                   final data = d.data() as Map<String, dynamic>;
-                  final matchesStatus = filterStatus == "All" ||
-                      d["status"] == filterStatus;
-                  final matchesSearch = _matchesSearch(data);
-                  return matchesStatus && matchesSearch;
+                  return _matchesFilter(data) && _matchesSearch(data);
                 }).toList();
 
                 if (filtered.isEmpty) {
-                  return const Center(child: Text("No agreements found"));
+                  return Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.assignment_outlined,
+                            size: 52, color: Colors.grey.shade300),
+                        const SizedBox(height: 12),
+                        Text(
+                          filterStatus == "not required"
+                              ? "No 'not required' agreements"
+                              : "No agreements found",
+                          style: TextStyle(color: Colors.grey.shade400),
+                        ),
+                      ],
+                    ),
+                  );
                 }
 
                 return ListView.builder(
@@ -184,12 +262,13 @@ class _RentAgreementsPageState extends State<RentAgreementsPage> {
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(data["propertyName"] ?? ""),
+                            const SizedBox(height: 4),
                             Container(
-                              margin: const EdgeInsets.only(top: 4),
                               padding: const EdgeInsets.symmetric(
                                   horizontal: 8, vertical: 2),
                               decoration: BoxDecoration(
-                                color: _statusColor(status).withOpacity(0.15),
+                                color:
+                                    _statusColor(status).withOpacity(0.15),
                                 borderRadius: BorderRadius.circular(12),
                                 border: Border.all(
                                     color: _statusColor(status), width: 1),
@@ -246,6 +325,8 @@ Property: ${data["propertyName"]}
     );
   }
 
+  // ─── Detail Dialog ────────────────────────────────────────────────────────
+
   void _showDetails(
       BuildContext context, Map<String, dynamic> data, String docId) {
     final status = data["status"] as String?;
@@ -261,7 +342,7 @@ Property: ${data["propertyName"]}
                 style: const TextStyle(fontSize: 20),
               ),
             ),
-            const SizedBox(width: 1),
+            const SizedBox(width: 6),
             Container(
               padding:
                   const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
@@ -292,27 +373,31 @@ Property: ${data["propertyName"]}
               _detailRow("Property Name", data["propertyName"] ?? ""),
               _detailRow("Stamp Duty", data["stampDuty"].toString()),
               _detailRow("Cost", data["cost"].toString()),
-              _detailRow("Cost per Party", data["costPerParty"].toString()),
+              _detailRow(
+                  "Cost per Party", data["costPerParty"].toString()),
               _detailRow(
                   "Start Date",
                   data["startDate"] != null
-                      ? dateFormat
-                          .format((data["startDate"] as Timestamp).toDate())
+                      ? dateFormat.format(
+                          (data["startDate"] as Timestamp).toDate())
                       : "Not set"),
-              _detailRow("Duration", "${data["durationMonths"]} months"),
+              _detailRow(
+                  "Duration", "${data["durationMonths"]} months"),
               _detailRow(
                   "End Date",
                   data["endDate"] != null
-                      ? dateFormat
-                          .format((data["endDate"] as Timestamp).toDate())
+                      ? dateFormat.format(
+                          (data["endDate"] as Timestamp).toDate())
                       : "Not set"),
               _detailRow("Owner Phone", data["ownerPhone"] ?? ""),
               _detailRow("Tenant Phone", data["tenantPhone"] ?? ""),
               _detailRow("Owner Email", data["ownerEmail"] ?? ""),
               _detailRow("Tenant Email", data["tenantEmail"] ?? ""),
-              _detailRow("Owner Charges Paid",
+              _detailRow(
+                  "Owner Charges Paid",
                   data["ownerChargesPaid"] == true ? "Paid" : "Not Paid"),
-              _detailRow("Tenant Charges Paid",
+              _detailRow(
+                  "Tenant Charges Paid",
                   data["tenantChargesPaid"] == true ? "Paid" : "Not Paid"),
               _detailRow("Status", data["status"] ?? ""),
             ],
@@ -336,16 +421,19 @@ Property: ${data["propertyName"]}
           ),
           TextButton(
             onPressed: () async {
+              Navigator.pop(context);
               await FirebaseFirestore.instance
                   .collection("rentAgreements")
                   .doc(docId)
                   .delete();
-              Navigator.pop(context);
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text("Agreement deleted")),
-              );
+              if (context.mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text("Agreement deleted")),
+                );
+              }
             },
-            child: const Text("Delete"),
+            child:
+                const Text("Delete", style: TextStyle(color: Colors.red)),
           ),
           TextButton(
             onPressed: () => Navigator.pop(context),
@@ -355,6 +443,8 @@ Property: ${data["propertyName"]}
       ),
     );
   }
+
+  // ─── Detail Row ───────────────────────────────────────────────────────────
 
   Widget _detailRow(String label, String value) {
     return InkWell(
