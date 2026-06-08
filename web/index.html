@@ -26,35 +26,38 @@
 </head>
 <body>
 
-  <!-- 🔍 Temporary debug tool — REMOVE after fixing -->
-  <!-- <script src="https://cdn.jsdelivr.net/npm/eruda"></script>
-  <script>eruda.init();</script> -->
-
   <script>
     if ('serviceWorker' in navigator) {
-      window.addEventListener('load', function () {
 
-        // Flutter SW
-        navigator.serviceWorker.register('flutter_service_worker.js')
-          .then(function(reg) {
-            console.log('Flutter SW registered:', reg);
-          }).catch(function(err) {
-            console.error('Flutter SW failed:', err);
-          });
+      // ✅ Flutter SW — registers immediately, no 'load' wrapper
+      // iOS Safari requires this to happen before Flutter bootstrap
+      navigator.serviceWorker
+        .register('flutter_service_worker.js', { scope: '/' })
+        .then(function(reg) {
+          console.log('Flutter SW registered:', reg);
+        })
+        .catch(function(err) {
+          console.warn('Flutter SW failed (non-fatal):', err);
+        });
 
-        // Firebase SW — now safe for iOS
-        navigator.serviceWorker.register('firebase-messaging-sw.js')
+      // ✅ Firebase SW — skipped on iOS entirely
+      // iOS Safari doesn't support FCM push, registering this SW causes errors
+      var isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
+      if (!isIOS) {
+        navigator.serviceWorker
+          .register('firebase-messaging-sw.js', { scope: '/firebase-cloud-messaging-push-scope' })
           .then(function(reg) {
             console.log('Firebase SW registered:', reg);
-          }).catch(function(err) {
-            console.error('Firebase SW failed:', err);
+          })
+          .catch(function(err) {
+            console.warn('Firebase SW failed (non-fatal):', err);
           });
+      }
 
-      });
     }
   </script>
 
-  <!-- ✅ Flutter bootstrap — must be after SW registration -->
+  <!-- ✅ Flutter bootstrap — loads after SW registration -->
   <script src="flutter_bootstrap.js" async></script>
 
 </body>

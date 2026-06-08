@@ -10,7 +10,7 @@ import 'screens/login_page.dart';
 import 'screens/dashboard.dart';
 
 import 'web_notification_stub.dart'
-    if (dart.library.html) 'web_notification.dart';
+    if (dart.library.js_interop) 'web_notification.dart';
 
 const String _vapidKey =
     'BC96x3XyR5k4GOKP2oTHl0fF0xyrxhOzEIJxCJDpwa2fP9mzsL4e4G-WC8zWeUfHC9wx1FdgugLv23vx6KYBASo';
@@ -57,56 +57,39 @@ Future<void> saveTokenToFirestore() async {
 }
 
 Future<void> setupFCM() async {
-  final messaging = FirebaseMessaging.instance;
-
-  final settings = await messaging.requestPermission(
-    alert: true,
-    badge: true,
-    sound: true,
-  );
-
-  debugPrint('🔔 FCM permission: ${settings.authorizationStatus}');
-
+  // ✅ Skip FCM entirely on web — iOS Safari doesn't support it,
+  // and we don't want permission prompts or token fetches on web at all
   if (kIsWeb) {
-    // ✅ Show confirmation notification on web
-    try {
-      final token = await messaging.getToken(vapidKey: _vapidKey);
-      debugPrint('✅ FCM Web Token obtained: $token');
+    debugPrint('ℹ️ FCM skipped on web');
+    return;
+  }
 
-      showBrowserNotification(
-        '✅ Notifications Active',
-        'Patel Properties will now alert you of new entries.',
-      );
-    } catch (e) {
-      debugPrint('❌ FCM web token error: $e');
-    }
+  try {
+    final messaging = FirebaseMessaging.instance;
 
-    // ✅ Foreground messages on web
+    final settings = await messaging.requestPermission(
+      alert: true,
+      badge: true,
+      sound: true,
+    );
+
+    debugPrint('🔔 FCM permission: ${settings.authorizationStatus}');
+
+    // ✅ Native Android only
+    NotificationService.initialize();
+
     FirebaseMessaging.onMessage.listen((RemoteMessage message) {
-      debugPrint('📨 Foreground message: ${message.notification?.title}');
       if (message.notification != null) {
-        showBrowserNotification(
+        NotificationService.showNotification(
           message.notification!.title ?? 'New Entry',
           message.notification!.body ?? '',
         );
       }
     });
-
-    return;
+  } catch (e) {
+    // ✅ Never let FCM crash the app
+    debugPrint('❌ FCM setup error (non-fatal): $e');
   }
-
-  // ✅ Native (Android/iOS)
-  NotificationService.initialize();
-
-  // ✅ Foreground messages on Android
-  FirebaseMessaging.onMessage.listen((RemoteMessage message) {
-    if (message.notification != null) {
-      NotificationService.showNotification(
-        message.notification!.title ?? 'New Entry',
-        message.notification!.body ?? '',
-      );
-    }
-  });
 }
 
 void main() async {
@@ -114,8 +97,10 @@ void main() async {
   await Firebase.initializeApp(
     options: DefaultFirebaseOptions.currentPlatform,
   );
-  await setupFCM();
+
+  // ✅ runApp first — never block the UI on FCM
   runApp(const RealEstateApp());
+  setupFCM(); // intentionally not awaited
 }
 
 class RealEstateApp extends StatelessWidget {

@@ -63,6 +63,14 @@ const HEADERS = [
 // ─── Helper: send to all tokens split by platform ──────────────────────────
 async function sendToAllTokens(title, body) {
   const db = admin.firestore();
+
+  // ── Kill switch ──────────────────────────────────────────
+  const settingsSnap = await db.collection("settings").doc("notifications").get();
+  if (settingsSnap.exists && settingsSnap.data().enabled === false) {
+    console.log("🔕 Notifications are disabled via kill switch — skipping.");
+    return;
+  }
+
   const snapshot = await db.collection("fcm_tokens").get();
 
   const webTokens = [];
