@@ -2,27 +2,63 @@ import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 
+// ─── RentSlab ─────────────────────────────────────────────────────────────────
+
+class RentSlab {
+  final String fromMonthKey; // e.g. "2024-01"
+  final String toMonthKey;   // e.g. "2024-11"
+  final double amount;
+
+  RentSlab({
+    required this.fromMonthKey,
+    required this.toMonthKey,
+    required this.amount,
+  });
+
+  factory RentSlab.fromMap(Map<String, dynamic> m) => RentSlab(
+        fromMonthKey: m['fromMonth'] ?? '',
+        toMonthKey: m['toMonth'] ?? '',
+        amount: (m['amount'] ?? 0).toDouble(),
+      );
+
+  Map<String, dynamic> toMap() => {
+        'fromMonth': fromMonthKey,
+        'toMonth': toMonthKey,
+        'amount': amount,
+      };
+
+  bool containsMonth(String key) {
+    return key.compareTo(fromMonthKey) >= 0 &&
+        key.compareTo(toMonthKey) <= 0;
+  }
+}
+
 // ─── Model ────────────────────────────────────────────────────────────────────
 
 class MonthRecord {
-  final String monthKey; // e.g. "2024-06"
+  final String monthKey;
   final DateTime month;
   bool isPaid;
   DateTime? paidDate;
   String? updatedBy;
+  // Rent that applies to this specific month
+  final double rentAmount;
 
   MonthRecord({
     required this.monthKey,
     required this.month,
+    required this.rentAmount,
     this.isPaid = false,
     this.paidDate,
     this.updatedBy,
   });
 
-  factory MonthRecord.fromFirestore(String key, Map<String, dynamic> data) {
+  factory MonthRecord.fromFirestore(
+      String key, Map<String, dynamic> data, double rentAmount) {
     return MonthRecord(
       monthKey: key,
       month: _keyToDate(key),
+      rentAmount: (data['rentAmount'] ?? rentAmount).toDouble(),
       isPaid: data['isPaid'] ?? false,
       paidDate: data['paidDate'] != null
           ? (data['paidDate'] as Timestamp).toDate()
@@ -42,7 +78,7 @@ class PropertyRecord {
   final String propertyName;
   final String ownerName;
   final String tenantName;
-  final double rent;
+  final List<RentSlab> rentSlabs;
   final double deposit;
   final String duration;
   final DateTime startDate;
@@ -55,7 +91,7 @@ class PropertyRecord {
     required this.propertyName,
     required this.ownerName,
     required this.tenantName,
-    required this.rent,
+    required this.rentSlabs,
     required this.deposit,
     required this.duration,
     required this.startDate,
@@ -64,14 +100,45 @@ class PropertyRecord {
     this.months = const [],
   });
 
+  /// Returns the rent applicable for a given month key, falling back to
+  /// the first slab if nothing matches (shouldn't happen with valid data).
+  double rentForMonth(String key) {
+    for (final slab in rentSlabs) {
+      if (slab.containsMonth(key)) return slab.amount;
+    }
+    return rentSlabs.isNotEmpty ? rentSlabs.first.amount : 0;
+  }
+
+  /// Convenience: the starting rent (shown on the card summary)
+  double get baseRent =>
+      rentSlabs.isNotEmpty ? rentSlabs.first.amount : 0;
+
   factory PropertyRecord.fromFirestore(DocumentSnapshot doc) {
     final data = doc.data() as Map<String, dynamic>;
+    final rawSlabs = data['rentSlabs'] as List<dynamic>? ?? [];
+    final slabs = rawSlabs
+        .map((e) => RentSlab.fromMap(e as Map<String, dynamic>))
+        .toList();
+
+    // Backwards compat: if old doc has flat `rent`, wrap it in one slab
+    if (slabs.isEmpty && data['rent'] != null) {
+      final start = (data['startDate'] as Timestamp).toDate();
+      final end = (data['endDate'] as Timestamp).toDate();
+      slabs.add(RentSlab(
+        fromMonthKey:
+            '${start.year}-${start.month.toString().padLeft(2, '0')}',
+        toMonthKey:
+            '${end.year}-${end.month.toString().padLeft(2, '0')}',
+        amount: (data['rent'] ?? 0).toDouble(),
+      ));
+    }
+
     return PropertyRecord(
       id: doc.id,
       propertyName: data['propertyName'] ?? '',
       ownerName: data['ownerName'] ?? '',
       tenantName: data['tenantName'] ?? '',
-      rent: (data['rent'] ?? 0).toDouble(),
+      rentSlabs: slabs,
       deposit: (data['deposit'] ?? 0).toDouble(),
       duration: data['duration'] ?? '',
       startDate: (data['startDate'] as Timestamp).toDate(),
@@ -84,7 +151,7 @@ class PropertyRecord {
         'propertyName': propertyName,
         'ownerName': ownerName,
         'tenantName': tenantName,
-        'rent': rent,
+        'rentSlabs': rentSlabs.map((s) => s.toMap()).toList(),
         'deposit': deposit,
         'duration': duration,
         'startDate': Timestamp.fromDate(startDate),
@@ -113,34 +180,45 @@ class PropertyService {
       FirebaseFirestore.instance.collection('rental_management');
   static String get _uid => FirebaseAuth.instance.currentUser?.uid ?? '';
 
-  // Add property + initialize payment subcollection docs
   static Future<void> addProperty(PropertyRecord p) async {
     final docRef = await _col.add({
       ...p.toFirestore(),
       'createdAt': FieldValue.serverTimestamp(),
       'createdBy': _uid,
     });
-    // Create payment docs for each month
     final batch = FirebaseFirestore.instance.batch();
-    for (final key in PropertyRecord.generateMonthKeys(p.startDate, p.endDate)) {
+    for (final key
+        in PropertyRecord.generateMonthKeys(p.startDate, p.endDate)) {
       batch.set(docRef.collection('payments').doc(key), {
         'isPaid': false,
         'paidDate': null,
         'updatedBy': null,
+        // Store rent per month so history survives future edits
+        'rentAmount': p.rentForMonth(key),
       });
     }
     await batch.commit();
   }
 
-  // Update property details
   static Future<void> updateProperty(PropertyRecord p) async {
     await _col.doc(p.id).update({
       ...p.toFirestore(),
       'updatedAt': FieldValue.serverTimestamp(),
     });
+    // Re-sync rentAmount on unpaid months in case slabs changed
+    final snap = await _col.doc(p.id).collection('payments').get();
+    final batch = FirebaseFirestore.instance.batch();
+    for (final doc in snap.docs) {
+      final data = doc.data();
+      if (data['isPaid'] == false) {
+        batch.update(doc.reference, {
+          'rentAmount': p.rentForMonth(doc.id),
+        });
+      }
+    }
+    await batch.commit();
   }
 
-  // Delete property + all payment docs
   static Future<void> deleteProperty(String propertyId) async {
     final payments =
         await _col.doc(propertyId).collection('payments').get();
@@ -152,31 +230,38 @@ class PropertyService {
     await batch.commit();
   }
 
-  // Update a single month payment
   static Future<void> updatePayment(
       String propertyId, MonthRecord record) async {
-    await _col.doc(propertyId).collection('payments').doc(record.monthKey).set({
+    await _col
+        .doc(propertyId)
+        .collection('payments')
+        .doc(record.monthKey)
+        .set({
       'isPaid': record.isPaid,
-      'paidDate':
-          record.paidDate != null ? Timestamp.fromDate(record.paidDate!) : null,
+      'paidDate': record.paidDate != null
+          ? Timestamp.fromDate(record.paidDate!)
+          : null,
       'updatedBy': _uid,
+      'rentAmount': record.rentAmount,
     });
   }
 
-  // Fetch payments for a property
   static Future<List<MonthRecord>> fetchPayments(
-      String propertyId, DateTime start, DateTime end) async {
-    final keys = PropertyRecord.generateMonthKeys(start, end);
+      String propertyId, PropertyRecord property) async {
+    final keys = PropertyRecord.generateMonthKeys(
+        property.startDate, property.endDate);
     final snap =
         await _col.doc(propertyId).collection('payments').get();
     final dataMap = {for (final d in snap.docs) d.id: d.data()};
     return keys.map((key) {
+      final rent = property.rentForMonth(key);
       if (dataMap.containsKey(key)) {
-        return MonthRecord.fromFirestore(key, dataMap[key]!);
+        return MonthRecord.fromFirestore(key, dataMap[key]!, rent);
       }
       return MonthRecord(
           monthKey: key,
-          month: MonthRecord._keyToDate(key));
+          month: MonthRecord._keyToDate(key),
+          rentAmount: rent);
     }).toList();
   }
 }
@@ -243,8 +328,7 @@ class PropertyManagementPage extends StatelessWidget {
             padding: const EdgeInsets.all(16),
             itemCount: docs.length,
             itemBuilder: (context, index) {
-              final property =
-                  PropertyRecord.fromFirestore(docs[index]);
+              final property = PropertyRecord.fromFirestore(docs[index]);
               return _PropertyCard(property: property);
             },
           );
@@ -263,7 +347,6 @@ class PropertyManagementPage extends StatelessWidget {
 
 class _PropertyCard extends StatelessWidget {
   final PropertyRecord property;
-
   const _PropertyCard({required this.property});
 
   @override
@@ -271,6 +354,16 @@ class _PropertyCard extends StatelessWidget {
     final totalMonths =
         PropertyRecord.generateMonthKeys(property.startDate, property.endDate)
             .length;
+
+    // Build a short rent summary string, e.g. "₹10,000 → ₹11,000"
+    String rentSummary() {
+      if (property.rentSlabs.length == 1) {
+        return '₹${property.rentSlabs.first.amount.toStringAsFixed(0)}/mo';
+      }
+      final first = property.rentSlabs.first.amount.toStringAsFixed(0);
+      final last = property.rentSlabs.last.amount.toStringAsFixed(0);
+      return '₹$first → ₹$last/mo';
+    }
 
     return GestureDetector(
       onTap: () => Navigator.push(
@@ -284,8 +377,8 @@ class _PropertyCard extends StatelessWidget {
               position: Tween<Offset>(
                 begin: const Offset(0, 0.05),
                 end: Offset.zero,
-              ).animate(CurvedAnimation(
-                  parent: animation, curve: Curves.easeOut)),
+              ).animate(
+                  CurvedAnimation(parent: animation, curve: Curves.easeOut)),
               child: child,
             ),
           ),
@@ -312,7 +405,6 @@ class _PropertyCard extends StatelessWidget {
             children: [
               Row(
                 children: [
-                  // Icon
                   Container(
                     width: 50,
                     height: 50,
@@ -324,8 +416,6 @@ class _PropertyCard extends StatelessWidget {
                         color: Color(0xFF1A1A2E), size: 26),
                   ),
                   const SizedBox(width: 14),
-
-                  // Property info
                   Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
@@ -368,7 +458,7 @@ class _PropertyCard extends StatelessWidget {
                         ),
                         const SizedBox(height: 4),
                         Text(
-                          '₹${property.rent.toStringAsFixed(0)}/mo · ${property.duration}',
+                          '${rentSummary()} · ${property.duration}',
                           style: const TextStyle(
                               fontSize: 12, color: Color(0xFF9CA3AF)),
                         ),
@@ -376,8 +466,6 @@ class _PropertyCard extends StatelessWidget {
                     ),
                   ),
                   const SizedBox(width: 8),
-
-                  // Edit & Delete buttons
                   Column(
                     children: [
                       _iconBtn(
@@ -395,10 +483,7 @@ class _PropertyCard extends StatelessWidget {
                   ),
                 ],
               ),
-
               const SizedBox(height: 14),
-
-              // ── Progress bar from Firestore ──
               StreamBuilder<QuerySnapshot>(
                 stream: FirebaseFirestore.instance
                     .collection('rental_management')
@@ -406,23 +491,36 @@ class _PropertyCard extends StatelessWidget {
                     .collection('payments')
                     .snapshots(),
                 builder: (context, snap) {
-                  int paidCount = 0;
-                  if (snap.hasData) {
-                    paidCount = snap.data!.docs
-                        .where((d) =>
-                            (d.data() as Map<String, dynamic>)['isPaid'] ==
-                            true)
-                        .length;
+                  if (!snap.hasData) {
+                    return const Text('Loading...',
+                        style: TextStyle(
+                            fontSize: 11, color: Color(0xFF6B7280)));
                   }
-                  final remaining = totalMonths - paidCount;
+                  final docs = snap.data!.docs;
+                  int paidCount = 0;
+                  double paidAmount = 0;
+                  double remainingAmount = 0;
+
+                  for (final doc in docs) {
+                    final data = doc.data() as Map<String, dynamic>;
+                    final rent =
+                        (data['rentAmount'] ?? property.baseRent).toDouble();
+                    if (data['isPaid'] == true) {
+                      paidCount++;
+                      paidAmount += rent;
+                    } else {
+                      remainingAmount += rent;
+                    }
+                  }
+
                   final progress =
                       totalMonths > 0 ? paidCount / totalMonths : 0.0;
                   final isComplete = paidCount == totalMonths;
+                  final remaining = totalMonths - paidCount;
 
                   return Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      // Progress bar
                       ClipRRect(
                         borderRadius: BorderRadius.circular(6),
                         child: LinearProgressIndicator(
@@ -439,39 +537,31 @@ class _PropertyCard extends StatelessWidget {
                         ),
                       ),
                       const SizedBox(height: 7),
-
-                      // Labels
                       Row(
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
-                          // Left: paid count
                           Text(
-                            snap.connectionState == ConnectionState.waiting
-                                ? 'Loading...'
-                                : '$paidCount / $totalMonths months paid',
+                            '$paidCount / $totalMonths months paid',
                             style: const TextStyle(
                                 fontSize: 11, color: Color(0xFF6B7280)),
                           ),
-
-                          // Right: remaining or all clear
                           isComplete
                               ? const Row(
                                   children: [
                                     Icon(Icons.check_circle_rounded,
-                                        size: 13, color: Color(0xFF10B981)),
+                                        size: 13,
+                                        color: Color(0xFF10B981)),
                                     SizedBox(width: 4),
-                                    Text(
-                                      'All paid',
-                                      style: TextStyle(
-                                          fontSize: 11,
-                                          color: Color(0xFF10B981),
-                                          fontWeight: FontWeight.w600),
-                                    ),
+                                    Text('All paid',
+                                        style: TextStyle(
+                                            fontSize: 11,
+                                            color: Color(0xFF10B981),
+                                            fontWeight: FontWeight.w600)),
                                   ],
                                 )
                               : Text(
-                                  '$remaining month${remaining == 1 ? '' : 's'} remaining · '
-                                  '₹${(remaining * property.rent).toStringAsFixed(0)} due',
+                                  '$remaining month${remaining == 1 ? '' : 's'} · '
+                                  '₹${remainingAmount.toStringAsFixed(0)} due',
                                   style: const TextStyle(
                                       fontSize: 11,
                                       color: Color(0xFF9CA3AF)),
@@ -525,8 +615,8 @@ void _confirmDelete(BuildContext context, PropertyRecord property) {
             Navigator.pop(context);
             await PropertyService.deleteProperty(property.id);
           },
-          child: const Text('Delete',
-              style: TextStyle(color: Color(0xFFEF4444))),
+          child:
+              const Text('Delete', style: TextStyle(color: Color(0xFFEF4444))),
         ),
       ],
     ),
@@ -544,9 +634,20 @@ void _showPropertyForm(BuildContext context, PropertyRecord? existing) {
   );
 }
 
+// Temporary slab state used inside the form
+class _SlabEntry {
+  DateTime? fromDate;
+  DateTime? toDate;
+  final TextEditingController amountCtrl;
+
+  _SlabEntry({this.fromDate, this.toDate, String? amount})
+      : amountCtrl = TextEditingController(text: amount ?? '');
+
+  void dispose() => amountCtrl.dispose();
+}
+
 class _PropertyForm extends StatefulWidget {
   final PropertyRecord? existing;
-
   const _PropertyForm({this.existing});
 
   @override
@@ -558,12 +659,13 @@ class _PropertyFormState extends State<_PropertyForm> {
   late final TextEditingController _propertyName;
   late final TextEditingController _ownerName;
   late final TextEditingController _tenantName;
-  late final TextEditingController _rent;
   late final TextEditingController _deposit;
   late final TextEditingController _duration;
   DateTime? _startDate;
   DateTime? _endDate;
   bool _loading = false;
+
+  final List<_SlabEntry> _slabs = [];
 
   @override
   void initState() {
@@ -572,13 +674,25 @@ class _PropertyFormState extends State<_PropertyForm> {
     _propertyName = TextEditingController(text: e?.propertyName ?? '');
     _ownerName = TextEditingController(text: e?.ownerName ?? '');
     _tenantName = TextEditingController(text: e?.tenantName ?? '');
-    _rent = TextEditingController(
-        text: e != null ? e.rent.toStringAsFixed(0) : '');
     _deposit = TextEditingController(
         text: e != null ? e.deposit.toStringAsFixed(0) : '');
     _duration = TextEditingController(text: e?.duration ?? '');
     _startDate = e?.startDate;
     _endDate = e?.endDate;
+
+    if (e != null && e.rentSlabs.isNotEmpty) {
+      for (final slab in e.rentSlabs) {
+        _slabs.add(_SlabEntry(
+          fromDate: MonthRecord._keyToDate(slab.fromMonthKey),
+          toDate: MonthRecord._keyToDate(slab.toMonthKey),
+          amount: slab.amount.toStringAsFixed(0),
+        ));
+      }
+    } else {
+      // Default: one slab
+      _slabs.add(_SlabEntry(
+          fromDate: _startDate, toDate: _endDate));
+    }
   }
 
   @override
@@ -586,14 +700,19 @@ class _PropertyFormState extends State<_PropertyForm> {
     _propertyName.dispose();
     _ownerName.dispose();
     _tenantName.dispose();
-    _rent.dispose();
     _deposit.dispose();
     _duration.dispose();
+    for (final s in _slabs) {
+      s.dispose();
+    }
     super.dispose();
   }
 
   String _fmt(DateTime d) =>
       '${d.day.toString().padLeft(2, '0')}/${d.month.toString().padLeft(2, '0')}/${d.year}';
+
+  String _monthKey(DateTime d) =>
+      '${d.year}-${d.month.toString().padLeft(2, '0')}';
 
   Future<void> _pickDate(bool isStart) async {
     final picked = await showDatePicker(
@@ -615,8 +734,40 @@ class _PropertyFormState extends State<_PropertyForm> {
       setState(() {
         if (isStart) {
           _startDate = picked;
+          // Auto-sync first slab from date
+          if (_slabs.isNotEmpty) _slabs.first.fromDate = picked;
         } else {
           _endDate = picked;
+          // Auto-sync last slab to date
+          if (_slabs.isNotEmpty) _slabs.last.toDate = picked;
+        }
+      });
+    }
+  }
+
+  Future<void> _pickSlabDate(_SlabEntry slab, bool isFrom) async {
+    final picked = await showDatePicker(
+      context: context,
+      initialDate:
+          (isFrom ? slab.fromDate : slab.toDate) ?? DateTime.now(),
+      firstDate: DateTime(2020),
+      lastDate: DateTime(2035),
+      builder: (context, child) => Theme(
+        data: Theme.of(context).copyWith(
+          colorScheme: const ColorScheme.light(
+            primary: Color(0xFF1A1A2E),
+            onPrimary: Colors.white,
+          ),
+        ),
+        child: child!,
+      ),
+    );
+    if (picked != null) {
+      setState(() {
+        if (isFrom) {
+          slab.fromDate = picked;
+        } else {
+          slab.toDate = picked;
         }
       });
     }
@@ -626,19 +777,48 @@ class _PropertyFormState extends State<_PropertyForm> {
     if (!_formKey.currentState!.validate()) return;
     if (_startDate == null || _endDate == null) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please select start and end dates')),
+        const SnackBar(
+            content: Text('Please select agreement start and end dates')),
       );
       return;
     }
+    // Validate slabs
+    for (int i = 0; i < _slabs.length; i++) {
+      final s = _slabs[i];
+      if (s.fromDate == null || s.toDate == null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+              content: Text('Please set dates for rent period ${i + 1}')),
+        );
+        return;
+      }
+      if (double.tryParse(s.amountCtrl.text.trim()) == null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+              content:
+                  Text('Please enter a valid amount for rent period ${i + 1}')),
+        );
+        return;
+      }
+    }
+
     setState(() => _loading = true);
 
     final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+    final slabs = _slabs
+        .map((s) => RentSlab(
+              fromMonthKey: _monthKey(s.fromDate!),
+              toMonthKey: _monthKey(s.toDate!),
+              amount: double.parse(s.amountCtrl.text.trim()),
+            ))
+        .toList();
+
     final record = PropertyRecord(
       id: widget.existing?.id ?? '',
       propertyName: _propertyName.text.trim(),
       ownerName: _ownerName.text.trim(),
       tenantName: _tenantName.text.trim(),
-      rent: double.tryParse(_rent.text.trim()) ?? 0,
+      rentSlabs: slabs,
       deposit: double.tryParse(_deposit.text.trim()) ?? 0,
       duration: _duration.text.trim(),
       startDate: _startDate!,
@@ -683,7 +863,6 @@ class _PropertyFormState extends State<_PropertyForm> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // Handle bar
               Center(
                 child: Container(
                   width: 40,
@@ -695,7 +874,6 @@ class _PropertyFormState extends State<_PropertyForm> {
                 ),
               ),
               const SizedBox(height: 16),
-
               Text(
                 isEdit ? 'Edit Property' : 'Add New Property',
                 style: const TextStyle(
@@ -709,16 +887,14 @@ class _PropertyFormState extends State<_PropertyForm> {
               _field('Property Name', _propertyName, Icons.home_work_rounded),
               _field('Owner Name', _ownerName, Icons.person_rounded),
               _field('Tenant Name', _tenantName, Icons.key_rounded),
-              _field('Monthly Rent (₹)', _rent, Icons.currency_rupee_rounded,
-                  isNumber: true),
               _field('Deposit (₹)', _deposit, Icons.savings_rounded,
                   isNumber: true),
-              _field('Duration (e.g. 11 months)', _duration,
+              _field('Duration (e.g. 22 months)', _duration,
                   Icons.schedule_rounded),
 
               const SizedBox(height: 4),
 
-              // Date pickers
+              // Agreement date range
               Row(
                 children: [
                   Expanded(
@@ -738,6 +914,60 @@ class _PropertyFormState extends State<_PropertyForm> {
                   ),
                 ],
               ),
+
+              const SizedBox(height: 22),
+
+              // ── Rent Slabs ──
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  const Text(
+                    'RENT PERIODS',
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w700,
+                      color: Color(0xFF6B7280),
+                      letterSpacing: 1.4,
+                    ),
+                  ),
+                  TextButton.icon(
+                    onPressed: () {
+                      setState(() {
+                        // Default new slab from = previous slab's toDate + 1 month
+                        DateTime? prevTo = _slabs.isNotEmpty
+                            ? _slabs.last.toDate
+                            : _startDate;
+                        DateTime? newFrom;
+                        if (prevTo != null) {
+                          newFrom =
+                              DateTime(prevTo.year, prevTo.month + 1);
+                        }
+                        // Auto-update previous slab's toDate to one month before newFrom
+                        if (_slabs.isNotEmpty && newFrom != null) {
+                          _slabs.last.toDate =
+                              DateTime(newFrom.year, newFrom.month - 1);
+                        }
+                        _slabs.add(_SlabEntry(
+                            fromDate: newFrom, toDate: _endDate));
+                      });
+                    },
+                    icon: const Icon(Icons.add, size: 16),
+                    label: const Text('Add Period'),
+                    style: TextButton.styleFrom(
+                      foregroundColor: const Color(0xFF1A1A2E),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 8, vertical: 4),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+
+              ..._slabs.asMap().entries.map((entry) {
+                final i = entry.key;
+                final slab = entry.value;
+                return _buildSlabRow(i, slab);
+              }),
 
               const SizedBox(height: 24),
 
@@ -771,6 +1001,98 @@ class _PropertyFormState extends State<_PropertyForm> {
     );
   }
 
+  Widget _buildSlabRow(int index, _SlabEntry slab) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF8F8FC),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFFE8E8F0)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                'Period ${index + 1}',
+                style: const TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  color: Color(0xFF1A1A2E),
+                ),
+              ),
+              if (_slabs.length > 1)
+                GestureDetector(
+                  onTap: () => setState(() {
+                    slab.dispose();
+                    _slabs.removeAt(index);
+                    // Re-sync last slab end to agreement end
+                    if (_slabs.isNotEmpty && _endDate != null) {
+                      _slabs.last.toDate = _endDate;
+                    }
+                  }),
+                  child: const Icon(Icons.close_rounded,
+                      size: 18, color: Color(0xFF9CA3AF)),
+                ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              Expanded(
+                child: _datePicker(
+                  label: 'From',
+                  value: slab.fromDate != null ? _fmt(slab.fromDate!) : null,
+                  onTap: () => _pickSlabDate(slab, true),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: _datePicker(
+                  label: 'To',
+                  value: slab.toDate != null ? _fmt(slab.toDate!) : null,
+                  onTap: () => _pickSlabDate(slab, false),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          TextFormField(
+            controller: slab.amountCtrl,
+            keyboardType: TextInputType.number,
+            decoration: InputDecoration(
+              labelText: 'Monthly Rent (₹)',
+              prefixIcon: const Icon(Icons.currency_rupee_rounded,
+                  size: 18, color: Color(0xFF6B7280)),
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(10),
+                borderSide: const BorderSide(color: Color(0xFFE8E8F0)),
+              ),
+              enabledBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(10),
+                borderSide: const BorderSide(color: Color(0xFFE8E8F0)),
+              ),
+              focusedBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(10),
+                borderSide:
+                    const BorderSide(color: Color(0xFF1A1A2E), width: 1.5),
+              ),
+              filled: true,
+              fillColor: Colors.white,
+              contentPadding:
+                  const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            ),
+            validator: (v) =>
+                v == null || v.trim().isEmpty ? 'Required' : null,
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _field(String label, TextEditingController ctrl, IconData icon,
       {bool isNumber = false}) {
     return Padding(
@@ -791,7 +1113,8 @@ class _PropertyFormState extends State<_PropertyForm> {
           ),
           focusedBorder: OutlineInputBorder(
             borderRadius: BorderRadius.circular(12),
-            borderSide: const BorderSide(color: Color(0xFF1A1A2E), width: 1.5),
+            borderSide:
+                const BorderSide(color: Color(0xFF1A1A2E), width: 1.5),
           ),
           filled: true,
           fillColor: const Color(0xFFFAFAFC),
@@ -811,8 +1134,7 @@ class _PropertyFormState extends State<_PropertyForm> {
     return GestureDetector(
       onTap: onTap,
       child: Container(
-        padding:
-            const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
         decoration: BoxDecoration(
           color: const Color(0xFFFAFAFC),
           borderRadius: BorderRadius.circular(12),
@@ -845,7 +1167,6 @@ class _PropertyFormState extends State<_PropertyForm> {
 
 class PropertyDetailPage extends StatefulWidget {
   final PropertyRecord property;
-
   const PropertyDetailPage({super.key, required this.property});
 
   @override
@@ -864,14 +1185,13 @@ class _PropertyDetailPageState extends State<PropertyDetailPage> {
 
   Future<void> _loadPayments() async {
     final months = await PropertyService.fetchPayments(
-      widget.property.id,
-      widget.property.startDate,
-      widget.property.endDate,
-    );
-    if (mounted) setState(() {
-      _months = months;
-      _loading = false;
-    });
+        widget.property.id, widget.property);
+    if (mounted) {
+      setState(() {
+        _months = months;
+        _loading = false;
+      });
+    }
   }
 
   String _formatDate(DateTime d) =>
@@ -920,6 +1240,8 @@ class _PropertyDetailPageState extends State<PropertyDetailPage> {
   Widget build(BuildContext context) {
     final p = widget.property;
     final paidCount = _months.where((m) => m.isPaid).length;
+    final paidAmount =
+        _months.where((m) => m.isPaid).fold(0.0, (s, m) => s + m.rentAmount);
 
     return Scaffold(
       backgroundColor: const Color(0xFFF5F6FA),
@@ -955,7 +1277,7 @@ class _PropertyDetailPageState extends State<PropertyDetailPage> {
           : ListView(
               padding: const EdgeInsets.all(16),
               children: [
-                // ── Info Card ──
+                // Info card
                 Container(
                   decoration: BoxDecoration(
                     color: const Color(0xFF1A1A2E),
@@ -975,13 +1297,23 @@ class _PropertyDetailPageState extends State<PropertyDetailPage> {
                         ),
                       ),
                       const SizedBox(height: 14),
-                      _infoRow(Icons.home_work_rounded, 'Property',
-                          p.propertyName),
+                      _infoRow(Icons.home_work_rounded, 'Property', p.propertyName),
                       _infoRow(Icons.person_rounded, 'Owner', p.ownerName),
                       _infoRow(Icons.key_rounded, 'Tenant', p.tenantName),
                       const Divider(color: Colors.white24, height: 24),
-                      _infoRow(Icons.currency_rupee_rounded, 'Monthly Rent',
-                          '₹${p.rent.toStringAsFixed(0)}'),
+                      // Show each slab
+                      ...p.rentSlabs.asMap().entries.map((e) {
+                        final slab = e.value;
+                        final label = p.rentSlabs.length == 1
+                            ? 'Monthly Rent'
+                            : 'Rent (Period ${e.key + 1})';
+                        return _infoRow(
+                          Icons.currency_rupee_rounded,
+                          label,
+                          '₹${slab.amount.toStringAsFixed(0)}'
+                          ' · ${slab.fromMonthKey} → ${slab.toMonthKey}',
+                        );
+                      }),
                       _infoRow(Icons.savings_rounded, 'Deposit',
                           '₹${p.deposit.toStringAsFixed(0)}'),
                       _infoRow(Icons.schedule_rounded, 'Duration', p.duration),
@@ -996,7 +1328,7 @@ class _PropertyDetailPageState extends State<PropertyDetailPage> {
 
                 const SizedBox(height: 20),
 
-                // ── Payment summary ──
+                // Payment summary
                 Container(
                   padding: const EdgeInsets.symmetric(
                       horizontal: 16, vertical: 12),
@@ -1020,9 +1352,10 @@ class _PropertyDetailPageState extends State<PropertyDetailPage> {
                       ),
                       const Spacer(),
                       Text(
-                        '₹${(paidCount * p.rent).toStringAsFixed(0)} collected',
+                        '₹${paidAmount.toStringAsFixed(0)} collected',
                         style: const TextStyle(
-                            fontSize: 13, color: Color(0xFF10B981),
+                            fontSize: 13,
+                            color: Color(0xFF10B981),
                             fontWeight: FontWeight.w600),
                       ),
                     ],
@@ -1047,7 +1380,6 @@ class _PropertyDetailPageState extends State<PropertyDetailPage> {
                 ..._months.map((record) => _MonthCard(
                       record: record,
                       monthLabel: _monthLabel(record.month),
-                      rent: p.rent,
                       onToggle: (val) => _togglePayment(record, val),
                       onDateTap: () => _pickPaidDate(record),
                       formatDate: _formatDate,
@@ -1067,8 +1399,7 @@ class _PropertyDetailPageState extends State<PropertyDetailPage> {
           Icon(icon, size: 16, color: Colors.white54),
           const SizedBox(width: 10),
           Text('$label: ',
-              style:
-                  const TextStyle(color: Colors.white54, fontSize: 13)),
+              style: const TextStyle(color: Colors.white54, fontSize: 13)),
           Expanded(
             child: Text(
               value,
@@ -1091,7 +1422,6 @@ class _PropertyDetailPageState extends State<PropertyDetailPage> {
 class _MonthCard extends StatelessWidget {
   final MonthRecord record;
   final String monthLabel;
-  final double rent;
   final ValueChanged<bool> onToggle;
   final VoidCallback onDateTap;
   final String Function(DateTime) formatDate;
@@ -1099,7 +1429,6 @@ class _MonthCard extends StatelessWidget {
   const _MonthCard({
     required this.record,
     required this.monthLabel,
-    required this.rent,
     required this.onToggle,
     required this.onDateTap,
     required this.formatDate,
@@ -1149,7 +1478,7 @@ class _MonthCard extends StatelessWidget {
                       ),
                       const SizedBox(height: 2),
                       Text(
-                        '₹${rent.toStringAsFixed(0)}',
+                        '₹${record.rentAmount.toStringAsFixed(0)}',
                         style: const TextStyle(
                             fontSize: 13, color: Color(0xFF6B7280)),
                       ),
@@ -1179,9 +1508,7 @@ class _MonthCard extends StatelessWidget {
                         style: TextStyle(
                           fontSize: 11,
                           fontWeight: FontWeight.w700,
-                          color: isPaid
-                              ? Colors.white
-                              : const Color(0xFF9CA3AF),
+                          color: isPaid ? Colors.white : const Color(0xFF9CA3AF),
                           letterSpacing: 0.5,
                         ),
                       ),
@@ -1201,8 +1528,7 @@ class _MonthCard extends StatelessWidget {
                     color: const Color(0xFFF0FDF4),
                     borderRadius: BorderRadius.circular(8),
                     border: Border.all(
-                        color:
-                            const Color(0xFF10B981).withOpacity(0.3)),
+                        color: const Color(0xFF10B981).withOpacity(0.3)),
                   ),
                   child: Row(
                     mainAxisSize: MainAxisSize.min,

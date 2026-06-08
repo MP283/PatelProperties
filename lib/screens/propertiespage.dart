@@ -15,6 +15,43 @@ class PropertiesPage extends StatefulWidget {
 class _PropertiesPageState extends State<PropertiesPage> {
   String selectedFilter = "All";
   String selectedType = "All";
+  String selectedBhk = "All";
+  final TextEditingController _searchController = TextEditingController();
+  String _searchQuery = "";
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
+  }
+
+  String _field(QueryDocumentSnapshot doc, String key, {String fallback = ""}) {
+    final data = doc.data() as Map<String, dynamic>;
+    return (data[key] ?? fallback).toString();
+  }
+
+  String _bhkValue(QueryDocumentSnapshot doc) {
+    final data = doc.data() as Map<String, dynamic>;
+    return (data['bhkOrSqft'] ?? data['bhk'] ?? '').toString();
+  }
+
+  String _bhkLabel(QueryDocumentSnapshot doc) {
+    final data = doc.data() as Map<String, dynamic>;
+    final label = (data['bhkLabel'] ?? 'bhk').toString();
+    return label == 'sqft' ? 'Sq. Ft.' : 'BHK';
+  }
+
+  // Keys tab — who physically holds the keys
+  bool _isWithBroker(QueryDocumentSnapshot doc) {
+    final data = doc.data() as Map<String, dynamic>;
+    return (data['keys'] ?? '').toString().toLowerCase() == 'with broker';
+  }
+
+  // Sourcing — property came via another broker (new toggle from add_property)
+  bool _isViaSecondBroker(QueryDocumentSnapshot doc) {
+    final data = doc.data() as Map<String, dynamic>;
+    return (data['viaSecondBroker'] ?? false) == true;
+  }
 
   Future<void> _callClient(String number) async {
     final Uri telUri = Uri(scheme: 'tel', path: number);
@@ -29,18 +66,26 @@ class _PropertiesPageState extends State<PropertiesPage> {
     }
   }
 
+  // Excludes: keys "With Broker" AND sourced via second broker
   Future<void> _copyList(
       List<QueryDocumentSnapshot> docs, String type, String sellOrRent) async {
     final filtered = docs.where((doc) {
-      final docType = doc["propertyType"] ?? "";
-      final docSellOrRent = doc["sellOrRent"] ?? "";
-      return docType == type && docSellOrRent == sellOrRent;
+      final docType = _field(doc, 'propertyType');
+      final docSellOrRent = _field(doc, 'sellOrRent');
+      final viaSecondBroker = _isViaSecondBroker(doc);
+      return docType == type &&
+          docSellOrRent == sellOrRent &&
+          !viaSecondBroker;
     }).toList();
 
     if (filtered.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text("No $type $sellOrRent properties found")),
-      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+              content:
+                  Text("No $type $sellOrRent properties with us found")),
+        );
+      }
       return;
     }
 
@@ -50,12 +95,13 @@ class _PropertiesPageState extends State<PropertiesPage> {
 
     for (int i = 0; i < filtered.length; i++) {
       final p = filtered[i];
-      final name = p["projectName"] ?? "";
-      final price = p["price"] ?? "";
+      final name = _field(p, 'projectName');
+      final price = _field(p, 'price');
+      final bhk = _bhkValue(p);
+      final label = _bhkLabel(p);
 
-      if (type == "Residential") {
-        final bhk = p["bhk"] ?? "";
-        buffer.writeln("${i + 1}. $name | $bhk BHK | ₹$price");
+      if (type == "Residential" && bhk.isNotEmpty) {
+        buffer.writeln("${i + 1}. $name | $bhk $label | ₹$price");
       } else {
         buffer.writeln("${i + 1}. $name | ₹$price");
       }
@@ -70,21 +116,22 @@ class _PropertiesPageState extends State<PropertiesPage> {
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-            content:
-                Text("$type $sellOrRent list copied (${filtered.length} items)")),
+            content: Text(
+                "$type $sellOrRent list copied (${filtered.length} items)")),
       );
     }
   }
 
   void _shareProperty(QueryDocumentSnapshot property) {
-    final name = property["projectName"] ?? "";
-    final bhk = property["bhk"] ?? "";
-    final price = property["price"] ?? "";
-    final sellOrRent = property["sellOrRent"] ?? "";
-    final type = property["propertyType"] ?? "";
+    final name = _field(property, 'projectName');
+    final bhk = _bhkValue(property);
+    final label = _bhkLabel(property);
+    final price = _field(property, 'price');
+    final sellOrRent = _field(property, 'sellOrRent');
+    final type = _field(property, 'propertyType');
 
-    final text = type == "Residential"
-        ? "🏠 $name\n$bhk BHK\n₹$price\n$sellOrRent"
+    final text = (type == "Residential" && bhk.isNotEmpty)
+        ? "🏠 $name\n$bhk $label\n₹$price\n$sellOrRent"
         : "🏢 $name\n₹$price\n$sellOrRent";
 
     Clipboard.setData(ClipboardData(text: text));
@@ -100,69 +147,140 @@ class _PropertiesPageState extends State<PropertiesPage> {
         title: const Text("Properties"),
         backgroundColor: Colors.blueGrey.shade700,
       ),
-      // ✅ No floatingActionButton here — moved inside body above the 4 buttons
       body: StreamBuilder<QuerySnapshot>(
         stream: FirebaseFirestore.instance
             .collection("properties")
             .orderBy("createdAt", descending: true)
             .snapshots(),
         builder: (context, snapshot) {
-          final allDocs =
-              snapshot.hasData ? snapshot.data!.docs : <QueryDocumentSnapshot>[];
+          final allDocs = snapshot.hasData
+              ? snapshot.data!.docs
+              : <QueryDocumentSnapshot>[];
+
+          final bhkSet = <String>{};
+          for (final doc in allDocs) {
+            final type = _field(doc, 'propertyType');
+            if (type == "Residential") {
+              final val = _bhkValue(doc);
+              if (val.isNotEmpty) bhkSet.add(val);
+            }
+          }
+          final bhkOptions = ['All', ...bhkSet.toList()..sort()];
 
           return Column(
             children: [
-              // Filters row
+              // ── Search bar ───────────────────────────────────────────────
               Padding(
-                padding: const EdgeInsets.all(12.0),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                child: TextField(
+                  controller: _searchController,
+                  decoration: InputDecoration(
+                    hintText: "Search by project, unit no. or owner...",
+                    prefixIcon: const Icon(Icons.search),
+                    suffixIcon: _searchQuery.isNotEmpty
+                        ? IconButton(
+                            icon: const Icon(Icons.clear),
+                            onPressed: () {
+                              _searchController.clear();
+                              setState(() => _searchQuery = "");
+                            },
+                          )
+                        : null,
+                    border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12)),
+                    contentPadding:
+                        const EdgeInsets.symmetric(vertical: 10),
+                  ),
+                  onChanged: (v) =>
+                      setState(() => _searchQuery = v.toLowerCase()),
+                ),
+              ),
+
+              // ── Filters row ──────────────────────────────────────────────
+              Padding(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
                 child: Row(
                   children: [
                     Expanded(
                       child: DropdownButtonFormField<String>(
-                        initialValue: selectedFilter,
+                        value: selectedFilter,
                         decoration: InputDecoration(
                           labelText: "Sell / Rent",
                           border: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(12),
-                          ),
+                              borderRadius: BorderRadius.circular(12)),
+                          contentPadding: const EdgeInsets.symmetric(
+                              horizontal: 10, vertical: 8),
                         ),
                         items: const [
+                          DropdownMenuItem(value: "All", child: Text("All")),
                           DropdownMenuItem(value: "Sell", child: Text("Sell")),
                           DropdownMenuItem(value: "Rent", child: Text("Rent")),
-                          DropdownMenuItem(value: "All", child: Text("All")),
                         ],
-                        onChanged: (value) =>
-                            setState(() => selectedFilter = value!),
+                        onChanged: (v) =>
+                            setState(() => selectedFilter = v!),
                       ),
                     ),
-                    const SizedBox(width: 12),
+                    const SizedBox(width: 8),
                     Expanded(
                       child: DropdownButtonFormField<String>(
-                        initialValue: selectedType,
+                        value: selectedType,
                         decoration: InputDecoration(
                           labelText: "Type",
                           border: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(12),
-                          ),
+                              borderRadius: BorderRadius.circular(12)),
+                          contentPadding: const EdgeInsets.symmetric(
+                              horizontal: 10, vertical: 8),
                         ),
                         items: const [
-                          DropdownMenuItem(
-                              value: "Residential", child: Text("Residential")),
-                          DropdownMenuItem(
-                              value: "Commercial", child: Text("Commercial")),
-                          DropdownMenuItem(
-                              value: "Other", child: Text("Other")),
                           DropdownMenuItem(value: "All", child: Text("All")),
+                          DropdownMenuItem(
+                              value: "Residential",
+                              child: Text("Residential")),
+                          DropdownMenuItem(
+                              value: "Commercial",
+                              child: Text("Commercial")),
+                          DropdownMenuItem(
+                              value: "Others", child: Text("Others")),
                         ],
-                        onChanged: (value) =>
-                            setState(() => selectedType = value!),
+                        onChanged: (v) {
+                          setState(() {
+                            selectedType = v!;
+                            if (v != "Residential") selectedBhk = "All";
+                          });
+                        },
                       ),
                     ),
+                    const SizedBox(width: 8),
+                    if (selectedType == "Residential" ||
+                        selectedType == "All") ...[
+                      Expanded(
+                        child: DropdownButtonFormField<String>(
+                          value: bhkOptions.contains(selectedBhk)
+                              ? selectedBhk
+                              : "All",
+                          decoration: InputDecoration(
+                            labelText: "BHK",
+                            border: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(12)),
+                            contentPadding: const EdgeInsets.symmetric(
+                                horizontal: 10, vertical: 8),
+                          ),
+                          items: bhkOptions
+                              .map((b) =>
+                                  DropdownMenuItem(value: b, child: Text(b)))
+                              .toList(),
+                          onChanged: (v) =>
+                              setState(() => selectedBhk = v!),
+                        ),
+                      ),
+                    ],
                   ],
                 ),
               ),
 
-              // Property list
+              // ── Property list ────────────────────────────────────────────
               Expanded(
                 child: Builder(builder: (context) {
                   if (snapshot.connectionState == ConnectionState.waiting) {
@@ -173,13 +291,36 @@ class _PropertiesPageState extends State<PropertiesPage> {
                   }
 
                   final filteredDocs = allDocs.where((doc) {
-                    final sellOrRent = doc["sellOrRent"] ?? "";
-                    final type = doc["propertyType"] ?? "";
-                    final matchesFilter =
-                        selectedFilter == "All" || sellOrRent == selectedFilter;
+                    final data = doc.data() as Map<String, dynamic>;
+                    final sellOrRent =
+                        (data['sellOrRent'] ?? '').toString();
+                    final type =
+                        (data['propertyType'] ?? '').toString();
+                    final bhk = _bhkValue(doc);
+
+                    final matchesFilter = selectedFilter == "All" ||
+                        sellOrRent == selectedFilter;
                     final matchesType =
                         selectedType == "All" || type == selectedType;
-                    return matchesFilter && matchesType;
+                    final matchesBhk = selectedBhk == "All" ||
+                        (type == "Residential" && bhk == selectedBhk);
+
+                    final projectName = (data['projectName'] ?? '')
+                        .toString()
+                        .toLowerCase();
+                    final unitNo =
+                        (data['unitNo'] ?? '').toString().toLowerCase();
+                    final ownerName =
+                        (data['ownerName'] ?? '').toString().toLowerCase();
+                    final matchesSearch = _searchQuery.isEmpty ||
+                        projectName.contains(_searchQuery) ||
+                        unitNo.contains(_searchQuery) ||
+                        ownerName.contains(_searchQuery);
+
+                    return matchesFilter &&
+                        matchesType &&
+                        matchesBhk &&
+                        matchesSearch;
                   }).toList();
 
                   if (filteredDocs.isEmpty) {
@@ -190,139 +331,73 @@ class _PropertiesPageState extends State<PropertiesPage> {
                     itemCount: filteredDocs.length,
                     itemBuilder: (context, index) {
                       final property = filteredDocs[index];
+                      final data =
+                          property.data() as Map<String, dynamic>;
+                      final type =
+                          (data['propertyType'] ?? '').toString();
+                      final bhk = _bhkValue(property);
+                      final bhkLabelStr = _bhkLabel(property);
+                      final projectName =
+                          (data['projectName'] ?? '').toString();
+                      final unitNo =
+                          (data['unitNo'] ?? '').toString();
+                      final price = (data['price'] ?? '').toString();
+                      final keysWithBroker = _isWithBroker(property);
+                      final viaSecondBroker = _isViaSecondBroker(property);
+
+                      String subtitle = '';
+                      if (bhk.isNotEmpty) {
+                        subtitle = '$bhk $bhkLabelStr • ₹$price';
+                      } else {
+                        subtitle = '₹$price';
+                      }
+
                       return Card(
                         margin: const EdgeInsets.symmetric(
                             horizontal: 12, vertical: 6),
                         shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12),
-                        ),
+                            borderRadius: BorderRadius.circular(12)),
                         elevation: 4,
                         child: ListTile(
                           leading: Icon(
-                            property["sellOrRent"] == "Sell"
+                            _field(property, 'sellOrRent') == "Sell"
                                 ? Icons.sell
                                 : Icons.key,
                             color: Colors.blueGrey,
                           ),
-                          title: Text(property["projectName"] ?? ""),
-                          subtitle: Text(
-                            "${property["bhk"] ?? ""} BHK • ₹${property["price"] ?? ""}",
+                          title: Row(
+                            children: [
+                              Expanded(
+                                child: Text(
+                                  unitNo.isNotEmpty
+                                      ? '$projectName • $unitNo'
+                                      : projectName,
+                                ),
+                              ),
+                              // Keys "With Broker" badge — purple
+                              if (keysWithBroker)
+                                _badge(
+                                  label: "Keys: Broker",
+                                  color: Colors.purple,
+                                ),
+                              if (keysWithBroker && viaSecondBroker)
+                                const SizedBox(width: 4),
+                              // Via second broker badge — orange
+                              if (viaSecondBroker)
+                                _badge(
+                                  label: "2nd Broker",
+                                  color: Colors.orange,
+                                ),
+                            ],
                           ),
+                          subtitle: Text(subtitle),
                           trailing: IconButton(
-                            icon: const Icon(Icons.share, color: Colors.blueGrey),
+                            icon: const Icon(Icons.share,
+                                color: Colors.blueGrey),
                             onPressed: () => _shareProperty(property),
                           ),
-                          onTap: () {
-                            showDialog(
-                              context: context,
-                              builder: (_) => AlertDialog(
-                                title: Row(
-                                  children: [
-                                    Expanded(
-                                      child: Text(
-                                        property["projectName"] ?? "Property",
-                                        style: const TextStyle(
-                                            fontSize: 18,
-                                            fontWeight: FontWeight.bold),
-                                      ),
-                                    ),
-                                    IconButton(
-                                      icon: const Icon(Icons.share,
-                                          color: Colors.blueGrey),
-                                      onPressed: () {
-                                        Navigator.pop(context);
-                                        _shareProperty(property);
-                                      },
-                                    ),
-                                  ],
-                                ),
-                                content: Column(
-                                  mainAxisSize: MainAxisSize.min,
-                                  crossAxisAlignment: CrossAxisAlignment.center,
-                                  children: [
-                                    Text(
-                                        "Sell/Rent: ${property["sellOrRent"] ?? ""}",
-                                        textAlign: TextAlign.center),
-                                    Text(
-                                        "Type: ${property["propertyType"] ?? ""}",
-                                        textAlign: TextAlign.center),
-                                    Text("BHK: ${property["bhk"] ?? ""}",
-                                        textAlign: TextAlign.center),
-                                    Text(
-                                      "Price: ₹${property["price"] ?? ""}",
-                                      textAlign: TextAlign.center,
-                                      style: const TextStyle(
-                                          fontWeight: FontWeight.bold),
-                                    ),
-                                    Text(
-                                        "Owner: ${property["ownerName"] ?? ""}",
-                                        textAlign: TextAlign.center),
-                                    TextButton(
-                                      onPressed: () => _callClient(
-                                          property["ownerNumber"] ?? ""),
-                                      child: Text(
-                                        "Owner Number: ${property["ownerNumber"] ?? ""}",
-                                        style: const TextStyle(
-                                          color: Colors.blue,
-                                          fontWeight: FontWeight.bold,
-                                        ),
-                                        textAlign: TextAlign.center,
-                                      ),
-                                    ),
-                                    Text("Keys: ${property["keys"] ?? ""}",
-                                        textAlign: TextAlign.center),
-                                  ],
-                                ),
-                                actionsAlignment: MainAxisAlignment.center,
-                                actions: [
-                                  TextButton(
-                                    onPressed: () => Navigator.pop(context),
-                                    child: const Text("Close"),
-                                  ),
-                                  TextButton(
-                                    onPressed: () async {
-                                      final messenger =
-                                          ScaffoldMessenger.of(context);
-                                      Navigator.pop(context);
-                                      messenger.showSnackBar(const SnackBar(
-                                          content:
-                                              Text("Deleting property...")));
-                                      try {
-                                        await FirebaseFirestore.instance
-                                            .collection("properties")
-                                            .doc(property.id)
-                                            .delete();
-                                        if (!mounted) return;
-                                        messenger.showSnackBar(const SnackBar(
-                                            content:
-                                                Text("Property deleted")));
-                                      } catch (e) {
-                                        if (!mounted) return;
-                                        messenger.showSnackBar(SnackBar(
-                                            content: Text(
-                                                "Error deleting property: $e")));
-                                      }
-                                    },
-                                    child: const Text("Delete",
-                                        style: TextStyle(color: Colors.red)),
-                                  ),
-                                  TextButton(
-                                    onPressed: () {
-                                      Navigator.pop(context);
-                                      Navigator.push(
-                                        context,
-                                        MaterialPageRoute(
-                                          builder: (context) => EditPropertyPage(
-                                              propertyId: property.id),
-                                        ),
-                                      );
-                                    },
-                                    child: const Text("Edit"),
-                                  ),
-                                ],
-                              ),
-                            );
-                          },
+                          onTap: () =>
+                              _showPropertyDetail(context, property),
                         ),
                       );
                     },
@@ -330,7 +405,7 @@ class _PropertiesPageState extends State<PropertiesPage> {
                 }),
               ),
 
-              // ✅ FAB sits just above the 4 buttons, aligned to the right
+              // ── FAB ──────────────────────────────────────────────────────
               Padding(
                 padding: const EdgeInsets.only(right: 16, bottom: 4),
                 child: Align(
@@ -349,40 +424,44 @@ class _PropertiesPageState extends State<PropertiesPage> {
                 ),
               ),
 
-              // ✅ 4 quick copy buttons — no background, no border
+              // ── 4 quick copy buttons ─────────────────────────────────────
               Padding(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                padding: const EdgeInsets.symmetric(
+                    horizontal: 16, vertical: 10),
                 child: Row(
                   mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                   children: [
                     _quickCopyButton(
                       label: "RR",
-                      tooltip: "Residential Rent",
+                      tooltip: "Residential Rent (ours only)",
                       color: Colors.teal,
                       icon: Icons.home,
-                      onTap: () => _copyList(allDocs, "Residential", "Rent"),
+                      onTap: () =>
+                          _copyList(allDocs, "Residential", "Rent"),
                     ),
                     _quickCopyButton(
                       label: "RS",
-                      tooltip: "Residential Sale",
+                      tooltip: "Residential Sale (ours only)",
                       color: Colors.indigo,
                       icon: Icons.home,
-                      onTap: () => _copyList(allDocs, "Residential", "Sell"),
+                      onTap: () =>
+                          _copyList(allDocs, "Residential", "Sell"),
                     ),
                     _quickCopyButton(
                       label: "CR",
-                      tooltip: "Commercial Rent",
+                      tooltip: "Commercial Rent (ours only)",
                       color: Colors.orange,
                       icon: Icons.business,
-                      onTap: () => _copyList(allDocs, "Commercial", "Rent"),
+                      onTap: () =>
+                          _copyList(allDocs, "Commercial", "Rent"),
                     ),
                     _quickCopyButton(
                       label: "CS",
-                      tooltip: "Commercial Sale",
+                      tooltip: "Commercial Sale (ours only)",
                       color: Colors.red,
                       icon: Icons.business,
-                      onTap: () => _copyList(allDocs, "Commercial", "Sell"),
+                      onTap: () =>
+                          _copyList(allDocs, "Commercial", "Sell"),
                     ),
                   ],
                 ),
@@ -390,6 +469,187 @@ class _PropertiesPageState extends State<PropertiesPage> {
             ],
           );
         },
+      ),
+    );
+  }
+
+  // Reusable badge widget
+  Widget _badge({required String label, required Color color}) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.12),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: color, width: 1),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(
+          fontSize: 10,
+          color: color,
+          fontWeight: FontWeight.bold,
+        ),
+      ),
+    );
+  }
+
+  void _showPropertyDetail(
+      BuildContext context, QueryDocumentSnapshot property) {
+    final data = property.data() as Map<String, dynamic>;
+    final bhk = _bhkValue(property);
+    final bhkLabelStr = _bhkLabel(property);
+    final type = (data['propertyType'] ?? '').toString();
+    final unitNo = (data['unitNo'] ?? '').toString();
+    final keysWithBroker = _isWithBroker(property);
+    final viaSecondBroker = _isViaSecondBroker(property);
+    final brokerName = (data['brokerName'] ?? '').toString();
+    final secondBrokerName = (data['secondBrokerName'] ?? '').toString();
+
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: Row(
+          children: [
+            Expanded(
+              child: Text(
+                (data['projectName'] ?? 'Property').toString(),
+                style: const TextStyle(
+                    fontSize: 18, fontWeight: FontWeight.bold),
+              ),
+            ),
+            IconButton(
+              icon: const Icon(Icons.share, color: Colors.blueGrey),
+              onPressed: () {
+                Navigator.pop(context);
+                _shareProperty(property);
+              },
+            ),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            if (unitNo.isNotEmpty)
+              Text("Unit No.: $unitNo", textAlign: TextAlign.center),
+            Text("Sell/Rent: ${(data['sellOrRent'] ?? '').toString()}",
+                textAlign: TextAlign.center),
+            Text("Type: $type", textAlign: TextAlign.center),
+            if (bhk.isNotEmpty)
+              Text("$bhkLabelStr: $bhk", textAlign: TextAlign.center),
+            Text(
+              "Price: ₹${(data['price'] ?? '').toString()}",
+              textAlign: TextAlign.center,
+              style: const TextStyle(fontWeight: FontWeight.bold),
+            ),
+            Text("Owner: ${(data['ownerName'] ?? '').toString()}",
+                textAlign: TextAlign.center),
+            TextButton(
+              onPressed: () =>
+                  _callClient((data['ownerNumber'] ?? '').toString()),
+              child: Text(
+                "Owner Number: ${(data['ownerNumber'] ?? '').toString()}",
+                style: const TextStyle(
+                    color: Colors.blue, fontWeight: FontWeight.bold),
+                textAlign: TextAlign.center,
+              ),
+            ),
+            Text(
+              "Keys: ${keysWithBroker ? 'With Broker' : (data['keys'] ?? '').toString()}",
+              textAlign: TextAlign.center,
+            ),
+            if (keysWithBroker && brokerName.isNotEmpty)
+              Text(
+                "Keys Broker: $brokerName",
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: Colors.purple),
+              ),
+            // Via second broker info
+            if (viaSecondBroker) ...[
+              const SizedBox(height: 6),
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                decoration: BoxDecoration(
+                  color: Colors.orange.withOpacity(0.08),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: Colors.orange.shade300),
+                ),
+                child: Column(
+                  children: [
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.handshake_outlined,
+                            size: 14, color: Colors.orange.shade700),
+                        const SizedBox(width: 6),
+                        Text(
+                          "Via Second Broker",
+                          style: TextStyle(
+                            color: Colors.orange.shade800,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 12,
+                          ),
+                        ),
+                      ],
+                    ),
+                    if (secondBrokerName.isNotEmpty) ...[
+                      const SizedBox(height: 2),
+                      Text(
+                        secondBrokerName,
+                        style: TextStyle(
+                            color: Colors.orange.shade700, fontSize: 12),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ],
+          ],
+        ),
+        actionsAlignment: MainAxisAlignment.center,
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text("Close"),
+          ),
+          TextButton(
+            onPressed: () async {
+              final messenger = ScaffoldMessenger.of(context);
+              Navigator.pop(context);
+              messenger.showSnackBar(
+                  const SnackBar(content: Text("Deleting property...")));
+              try {
+                await FirebaseFirestore.instance
+                    .collection("properties")
+                    .doc(property.id)
+                    .delete();
+                if (!mounted) return;
+                messenger.showSnackBar(
+                    const SnackBar(content: Text("Property deleted")));
+              } catch (e) {
+                if (!mounted) return;
+                messenger.showSnackBar(
+                    SnackBar(content: Text("Error deleting: $e")));
+              }
+            },
+            child:
+                const Text("Delete", style: TextStyle(color: Colors.red)),
+          ),
+          TextButton(
+            onPressed: () {
+              Navigator.pop(context);
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (context) =>
+                      EditPropertyPage(propertyId: property.id),
+                ),
+              );
+            },
+            child: const Text("Edit"),
+          ),
+        ],
       ),
     );
   }
