@@ -1,21 +1,59 @@
 import 'package:flutter/material.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:patel_properties/screens/clients_page.dart';
 import 'package:patel_properties/screens/upcoming_visits.dart';
 import 'propertiespage.dart';
 import 'rent_agreements_page.dart';
-import 'property_management_page.dart'; // Add this import
+import 'property_management_page.dart';
 
 class DashboardPage extends StatelessWidget {
   const DashboardPage({super.key});
 
+  Future<void> _logout(BuildContext context) async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text("Log Out"),
+        content: const Text("Are you sure you want to log out?"),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text("Cancel"),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: Text(
+              "Log Out",
+              style: TextStyle(color: Colors.red.shade600),
+            ),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm == true) {
+      await FirebaseAuth.instance.signOut();
+      // Navigator will handle redirect via your auth stream / login route
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final screenWidth = MediaQuery.of(context).size.width;
-
-    // Decide how many columns based on screen size
     final crossAxisCount = screenWidth > 800 ? 4 : 2;
 
     return Scaffold(
+      appBar: AppBar(
+        backgroundColor: Colors.blueGrey.shade700,
+        title: const Text("Dashboard"),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.logout),
+            tooltip: "Log Out",
+            onPressed: () => _logout(context),
+          ),
+        ],
+      ),
       body: Stack(
         children: [
           // Background image with 50% transparency
@@ -40,14 +78,6 @@ class DashboardPage extends StatelessWidget {
               padding: const EdgeInsets.all(20.0),
               child: Column(
                 children: [
-                  const SizedBox(height: 30),
-                  Text(
-                    "Dashboard",
-                    style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                          fontWeight: FontWeight.bold,
-                          color: Colors.black87,
-                        ),
-                  ),
                   const SizedBox(height: 30),
 
                   // Buttons grid
@@ -114,7 +144,6 @@ class DashboardPage extends StatelessWidget {
                               );
                             },
                           ),
-                          // ✅ NEW BUTTON
                           _buildDashboardButton(
                             context,
                             title: "Property Management",
